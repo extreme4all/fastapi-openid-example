@@ -2,11 +2,12 @@ import httpx  # httpx > aiohttp because httpx is used in depending lib
 import jwt
 from jwt.jwks_client import PyJWKClient
 from authlib.integrations.starlette_client import OAuth, StarletteOAuth2App
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, status
 from pydantic_settings import BaseSettings
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
-
+from fastapi.responses import RedirectResponse
+from fastapi.exceptions import HTTPException
 
 class Settings(BaseSettings):
     client_id: str
@@ -26,15 +27,32 @@ oauth.register(
     client_secret=settings.client_secret,
     client_kwargs={"scope": "openid email profile"},
 )
-
-oauth: StarletteOAuth2App = oauth.okta
-
+oauth: StarletteOAuth2App = oauth.create_client("okta")
 
 app = FastAPI()
 
 # we need this to save temporary code & state in session
 app.add_middleware(SessionMiddleware, secret_key="some-random-string-qsdfqsdf")
 
+
+async def get_current_user(request: Request = None):
+    try:
+        print("Request session:", request.session)
+        id_token = request.session["id_token"]
+        print("ID token:", id_token)
+        print()
+        user: dict = await oauth.parse_id_token(id_token, nonce="")
+        
+        return user
+    except Exception as e:
+        print({"error": str(e)})
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+
+@app.exception_handler(HTTPException)
+async def custom_exception_handler(request:Request, exc):
+    if exc.status_code == 401:
+        return RedirectResponse(url="/login")  # Redirect to "/login" on 401 error
+    return exc  # Let other exceptions propagate
 
 async def fetch_jwt_key(key_url, kid):
     async with httpx.AsyncClient() as client:
@@ -162,12 +180,13 @@ async def callback(request: Request):
             "access_token_info": resp.get("error"),
             "token": token,
         }
+    request.session["id_token"] = id_token
     return dict(token)
 
 
 @app.get("/home")
-async def home():
-    return {"page": "home"}
+async def home(request: Request, user = Depends(get_current_user)):
+    return {"page": "home", "user": user}
 
 
 @app.get("/")
